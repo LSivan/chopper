@@ -38,11 +38,12 @@ func (wg *WorkGroup) AddWork(work Handler) error {
 	if !wg.isStart {
 		return fmt.Errorf("work group is stop so exec immediatly.:%v", work())
 	}
+	shard := wg.idxGen()
 	select {
-	case wg.buffer[wg.idxGen()] <- work:
+	case wg.buffer[shard] <- work:
 		return nil
-		//default:
-		//	return fmt.Errorf("work is full")
+	default:
+		return fmt.Errorf("work is full")
 	}
 }
 
@@ -51,7 +52,8 @@ func (wg *WorkGroup) MustAddWork(work Handler) error {
 	if !wg.isStart {
 		return fmt.Errorf("work group is stop so exec immediatly.:%v", work())
 	}
-	wg.buffer[wg.idxGen()] <- work
+	shard := wg.idxGen()
+	wg.buffer[shard] <- work
 	return nil
 }
 
@@ -61,22 +63,28 @@ func (wg *WorkGroup) workWithWait() {
 		waitGroup.Add(1)
 		go func(j int) {
 			defer waitGroup.Done()
-			defer func() {
-				if err := recover(); err != nil {
-					xlog.Sugar.Named("WorkGroup work").Errorw("panic error", "err", fmt.Errorf("%v", err))
-				}
-			}()
 			c := wg.buffer[j]
 			for {
-				select {
-				case w := <-c:
-					if w != nil {
-						xerror.DoIfErrorNotNil(w(), func(err error) {
-							xlog.Sugar.Named("WorkGroup work").Errorw("work return error", "err", err.Error())
-						})
+				job := func() bool {
+					defer func() {
+						if err := recover(); err != nil {
+							xlog.Sugar.Named("WorkGroup work").Errorw("occur error", "err", fmt.Errorf("%v", err))
+						}
+					}()
+					select {
+					case w := <-c:
+						if w != nil {
+							xerror.DoIfErrorNotNil(w(), func(err error) {
+								xlog.Sugar.Named("WorkGroup work").Errorw("work return error", "err", err.Error())
+							})
+						}
+					default:
+						return true
 					}
-				default:
-					return
+					return false
+				}
+				if job() {
+					break
 				}
 			}
 		}(i)
@@ -87,22 +95,25 @@ func (wg *WorkGroup) workWithWait() {
 func (wg *WorkGroup) work() {
 	for i := 0; i < len(wg.buffer); i++ {
 		go func(j int) {
-			fmt.Println("begin consumer channel", j)
-			defer func() {
-				if err := recover(); err != nil {
-					xlog.Sugar.Named("WorkGroup work").Errorw("occur error", "err", fmt.Errorf("%v", err))
-				}
-			}()
 			c := wg.buffer[j]
 			for {
-				select {
-				case w := <-c:
-					if w != nil {
-						xerror.DoIfErrorNotNil(w(), func(err error) {
-							xlog.Sugar.Named("WorkGroup work").Errorw("work return error", "err", err.Error())
-						})
+				job := func() {
+					defer func() {
+						if err := recover(); err != nil {
+							xlog.Sugar.Named("WorkGroup work").Errorw("occur error", "err", fmt.Errorf("%v", err))
+
+						}
+					}()
+					select {
+					case w := <-c:
+						if w != nil {
+							xerror.DoIfErrorNotNil(w(), func(err error) {
+								xlog.Sugar.Named("WorkGroup work").Errorw("work return error", "err", err.Error())
+							})
+						}
 					}
 				}
+				job()
 			}
 		}(i)
 	}
